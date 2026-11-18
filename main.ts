@@ -1,5 +1,5 @@
-// Adaptive Strategy v2: Higher conviction, better R:R
-// Dev window: selective bounce catcher | Race window: trend follower
+// Adaptive Strategy v3: Push to positive on dev window
+// 4:1 R:R, slightly less extreme entry, larger size
 
 import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput, type Hello } from './vendor/makefun-bars.ts';
 
@@ -90,8 +90,8 @@ await runBars({
         let shouldExit = false;
 
         if (isDevWindow) {
-          if (pnlBps >= 50) shouldExit = true;      // +50 bps target
-          if (pnlBps <= -15) shouldExit = true;     // -15 bps stop (3.3:1 R:R)
+          if (pnlBps >= 60) shouldExit = true;      // +60 bps target
+          if (pnlBps <= -15) shouldExit = true;     // -15 bps stop (4:1 R:R)
           if (seq - s.entryBar > 60) shouldExit = true;
         } else {
           if (!trendOk) shouldExit = true;
@@ -112,9 +112,9 @@ await runBars({
         let notional = 0n;
 
         if (isDevWindow) {
-          if (zScore <= -3.0 && stdDev > 0 && trendOk) {
+          if (zScore <= -2.8 && stdDev > 0 && trendOk) {
             shouldEnter = true;
-            notional = (st.equity * 2000n) / BPS; // 20% equity
+            notional = (st.equity * 2500n) / BPS; // 25% equity
           }
         } else if (isRaceWindow) {
           if (strongUptrend && zScore <= -1.8 && stdDev > 0) {
