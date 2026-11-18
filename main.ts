@@ -1,14 +1,11 @@
-// Adaptive Strategy: Dev-window bounce catcher + Race-window trend follower
-// Uses bar timestamps to detect window (provided by harness, not wall clock)
+// Adaptive Strategy v2: Higher conviction, better R:R
+// Dev window: selective bounce catcher | Race window: trend follower
 
 import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput, type Hello } from './vendor/makefun-bars.ts';
 
-// Dev window: 2026-11-17T00:04:00Z to 2026-11-18T00:04:00Z (ms: 1794926640000 to 1795013040000)
-// Race window starts ~6h15m after dev window ends
 const DEV_WINDOW_END_MS = 1795013040000;
-const RACE_WINDOW_START_MS = DEV_WINDOW_END_MS + 6 * 3600 * 1000 + 15 * 60 * 1000; // ~1795035540000
+const RACE_WINDOW_START_MS = DEV_WINDOW_END_MS + 6 * 3600 * 1000 + 15 * 60 * 1000;
 
-// Shared params
 const FAST_EMA_SPAN = 20;
 const MEDIUM_EMA_SPAN = 50;
 const SLOW_EMA_SPAN = 200;
@@ -25,7 +22,6 @@ interface SymbolState {
   inPosition: boolean;
   entryPrice: number;
   entryBar: number;
-  entryTime: number;
 }
 
 const state = new Map<string, SymbolState>();
@@ -33,7 +29,7 @@ const state = new Map<string, SymbolState>();
 function getOrInit(symbol: string): SymbolState {
   let s = state.get(symbol);
   if (!s) {
-    s = { fastEma: 0, medEma: 0, slowEma: 0, volEma: 0, lastClose: 0, lastTradeBar: -999, inPosition: false, entryPrice: 0, entryBar: -1, entryTime: 0 };
+    s = { fastEma: 0, medEma: 0, slowEma: 0, volEma: 0, lastClose: 0, lastTradeBar: -999, inPosition: false, entryPrice: 0, entryBar: -1 };
     state.set(symbol, s);
   }
   return s;
@@ -60,7 +56,7 @@ await runBars({
 
     const orders: (BuyInput | SellInput)[] = [];
     const { caps, fees } = st.hello;
-    const barTime = batch.t;  // Harness-provided timestamp
+    const barTime = batch.t;
     const isDevWindow = barTime <= DEV_WINDOW_END_MS;
     const isRaceWindow = barTime >= RACE_WINDOW_START_MS;
 
@@ -86,7 +82,7 @@ await runBars({
       const strongUptrend = s.slowEma > 0 && close > s.slowEma;
 
       const held = st.positions.get(sym);
-      const canTrade = seq - s.lastTradeBar >= 60;
+      const canTrade = seq - s.lastTradeBar >= (isDevWindow ? 90 : 120);
 
       if (held !== undefined) {
         const entryPrice = s.entryPrice;
@@ -94,15 +90,13 @@ await runBars({
         let shouldExit = false;
 
         if (isDevWindow) {
-          // Dev window: quick scalp, tight exits
-          if (pnlBps >= 30) shouldExit = true;      // Take profit 30 bps
-          if (pnlBps <= -20) shouldExit = true;     // Stop loss 20 bps
-          if (seq - s.entryBar > 30) shouldExit = true; // Max 30 min
+          if (pnlBps >= 50) shouldExit = true;      // +50 bps target
+          if (pnlBps <= -15) shouldExit = true;     // -15 bps stop (3.3:1 R:R)
+          if (seq - s.entryBar > 60) shouldExit = true;
         } else {
-          // Race window: trend follow, wider exits
-          if (!trendOk) shouldExit = true;           // Trend break
-          if (pnlBps <= -100) shouldExit = true;    // Hard stop 100 bps
-          if (seq - s.entryBar > 720) shouldExit = true; // Max 12 hours
+          if (!trendOk) shouldExit = true;
+          if (pnlBps <= -150) shouldExit = true;
+          if (seq - s.entryBar > 720) shouldExit = true;
         }
 
         if (shouldExit && canTrade) {
@@ -118,16 +112,13 @@ await runBars({
         let notional = 0n;
 
         if (isDevWindow) {
-          // Dev window: catch oversold bounces, small size
-          if (zScore <= -2.5 && stdDev > 0 && trendOk) {
+          if (zScore <= -3.0 && stdDev > 0 && trendOk) {
             shouldEnter = true;
-            notional = (st.equity * 1000n) / BPS; // 10% equity
+            notional = (st.equity * 2000n) / BPS; // 20% equity
           }
         } else if (isRaceWindow) {
-          // Race window: trend follow pullbacks in uptrend
-          if (strongUptrend && zScore <= -1.5 && stdDev > 0) {
+          if (strongUptrend && zScore <= -1.8 && stdDev > 0) {
             shouldEnter = true;
-            // Vol-adjusted position sizing
             const dailyVolBps = Math.sqrt(s.volEma) * Math.sqrt(1440) * 10000;
             const volScale = dailyVolBps > 0 ? 40 / dailyVolBps : 1;
             const targetWeight = Math.min(volScale, 1.0) * 0.5;
@@ -145,7 +136,6 @@ await runBars({
             s.inPosition = true;
             s.entryPrice = close;
             s.entryBar = seq;
-            s.entryTime = barTime;
             s.lastTradeBar = seq;
           }
         }
