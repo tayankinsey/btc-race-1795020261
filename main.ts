@@ -1,21 +1,22 @@
-// Conservative Regime-Aware Mean Reversion for cbBTC/USDC 1m bars
-// Stays in cash in downtrends, trades oversold bounces in ranging/uptrending markets
+// Conservative Regime-Aware Mean Reversion - Ultra-selective edition
+// Only trades high-conviction oversold bounces in confirmed uptrends
 
 import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput, type Hello } from './vendor/makefun-bars.ts';
 
-// Configuration
 const FAST_EMA_SPAN = 20;
+const MEDIUM_EMA_SPAN = 50;
 const SLOW_EMA_SPAN = 200;
 const VOL_EMA_SPAN = 50;
-const ENTRY_ZSCORE = -2.0;
-const EXIT_ZSCORE = 0.0;
-const STOP_LOSS_ZSCORE = -3.5;
-const VOL_TARGET_BPS = 50;
-const MIN_BARS_BETWEEN_TRADES = 30;
-const MAX_SLIPPAGE_BPS = 100;
+const ENTRY_ZSCORE = -3.0;      // Very oversold only
+const EXIT_ZSCORE = -0.5;       // Exit before full mean reversion
+const STOP_LOSS_ZSCORE = -4.0;
+const VOL_TARGET_BPS = 30;      // Lower vol target
+const MIN_BARS_BETWEEN_TRADES = 100;  // Very selective
+const MAX_SLIPPAGE_BPS = 50;
 
 interface SymbolState {
-  priceEma: number;
+  fastEma: number;
+  medEma: number;
   slowEma: number;
   volEma: number;
   lastClose: number;
@@ -30,7 +31,7 @@ const state = new Map<string, SymbolState>();
 function getOrInit(symbol: string): SymbolState {
   let s = state.get(symbol);
   if (!s) {
-    s = { priceEma: 0, slowEma: 0, volEma: 0, lastClose: 0, lastTradeBar: -999, inPosition: false, entryPrice: 0, entryBar: -1 };
+    s = { fastEma: 0, medEma: 0, slowEma: 0, volEma: 0, lastClose: 0, lastTradeBar: -999, inPosition: false, entryPrice: 0, entryBar: -1 };
     state.set(symbol, s);
   }
   return s;
@@ -64,7 +65,8 @@ await runBars({
       const close = Number(bar.c);
       const seq = batch.seq;
 
-      s.priceEma = emaUpdate(s.priceEma, close, FAST_EMA_SPAN);
+      s.fastEma = emaUpdate(s.fastEma, close, FAST_EMA_SPAN);
+      s.medEma = emaUpdate(s.medEma, close, MEDIUM_EMA_SPAN);
       s.slowEma = emaUpdate(s.slowEma, close, SLOW_EMA_SPAN);
 
       if (s.lastClose > 0) {
@@ -73,9 +75,10 @@ await runBars({
       }
       s.lastClose = close;
 
-      const inDowntrend = s.slowEma > 0 && close < s.slowEma * 0.995;
+      // Trend regime: require uptrend on both medium and slow EMAs
+      const inUptrend = s.medEma > 0 && s.slowEma > 0 && close > s.medEma && close > s.slowEma * 0.998;
       const stdDev = s.volEma > 0 ? Math.sqrt(s.volEma) * close : 0;
-      const zScore = s.priceEma > 0 && stdDev > 0 ? (close - s.priceEma) / stdDev : 0;
+      const zScore = s.fastEma > 0 && stdDev > 0 ? (close - s.fastEma) / stdDev : 0;
 
       const held = st.positions.get(sym);
       const canTrade = seq - s.lastTradeBar >= MIN_BARS_BETWEEN_TRADES;
@@ -84,8 +87,8 @@ await runBars({
         let shouldExit = false;
         if (zScore >= EXIT_ZSCORE) shouldExit = true;
         if (zScore <= STOP_LOSS_ZSCORE) shouldExit = true;
-        if (inDowntrend && zScore < -1) shouldExit = true;
-        if (seq - s.entryBar > 240) shouldExit = true;
+        if (!inUptrend) shouldExit = true;  // Exit if trend breaks
+        if (seq - s.entryBar > 120) shouldExit = true;  // Max 2 hours
 
         if (shouldExit && canTrade) {
           orders.push({ side: 'sell', symbol: sym, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS });
@@ -95,11 +98,11 @@ await runBars({
         }
       }
 
-      if (!s.inPosition && !inDowntrend && canTrade) {
+      if (!s.inPosition && inUptrend && canTrade) {
         if (zScore <= ENTRY_ZSCORE && stdDev > 0) {
           const dailyVolBps = Math.sqrt(s.volEma) * Math.sqrt(1440) * 10000;
           const volScale = dailyVolBps > 0 ? VOL_TARGET_BPS / dailyVolBps : 1;
-          const targetWeight = Math.min(volScale, 1.0) * 0.8;
+          const targetWeight = Math.min(volScale, 1.0) * 0.5;  // Half Kelly
 
           const maxWeight = BigInt(caps.max_weight_bps);
           const weightRoom = (maxWeight * st.equity) / BPS - st.value(sym, held?.qty ?? 0n);
