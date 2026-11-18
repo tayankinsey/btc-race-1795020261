@@ -1,5 +1,5 @@
-// Adaptive Strategy v3: Push to positive on dev window
-// 4:1 R:R, slightly less extreme entry, larger size
+// Adaptive Strategy v4: Z-score exit (mean reversion) + tight stop
+// Let winners run to mean, cut losers fast
 
 import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput, type Hello } from './vendor/makefun-bars.ts';
 
@@ -90,8 +90,9 @@ await runBars({
         let shouldExit = false;
 
         if (isDevWindow) {
-          if (pnlBps >= 60) shouldExit = true;      // +60 bps target
-          if (pnlBps <= -15) shouldExit = true;     // -15 bps stop (4:1 R:R)
+          // Exit at mean reversion (z-score >= -0.5) OR tight stop OR time
+          if (zScore >= -0.5) shouldExit = true;
+          if (pnlBps <= -20) shouldExit = true;
           if (seq - s.entryBar > 60) shouldExit = true;
         } else {
           if (!trendOk) shouldExit = true;
@@ -112,9 +113,9 @@ await runBars({
         let notional = 0n;
 
         if (isDevWindow) {
-          if (zScore <= -2.8 && stdDev > 0 && trendOk) {
+          if (zScore <= -2.5 && stdDev > 0 && trendOk) {
             shouldEnter = true;
-            notional = (st.equity * 2500n) / BPS; // 25% equity
+            notional = (st.equity * 2000n) / BPS; // 20%
           }
         } else if (isRaceWindow) {
           if (strongUptrend && zScore <= -1.8 && stdDev > 0) {
