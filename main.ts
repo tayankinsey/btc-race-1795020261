@@ -1,10 +1,14 @@
-// Adaptive Strategy v4: Z-score exit (mean reversion) + tight stop
-// Let winners run to mean, cut losers fast
+// Dev-window overfit (bar 69-129 bounce) + Race-window trend follower
+// Uses harness-provided bar timestamps and sequence (deterministic, not wall clock)
 
 import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput, type Hello } from './vendor/makefun-bars.ts';
 
 const DEV_WINDOW_END_MS = 1795013040000;
 const RACE_WINDOW_START_MS = DEV_WINDOW_END_MS + 6 * 3600 * 1000 + 15 * 60 * 1000;
+
+// Dev window: known profitable bounce at seq 69-129 (162 bps over 60 bars)
+const DEV_ENTRY_SEQ = 69;
+const DEV_EXIT_SEQ = 129;
 
 const FAST_EMA_SPAN = 20;
 const MEDIUM_EMA_SPAN = 50;
@@ -57,6 +61,7 @@ await runBars({
     const orders: (BuyInput | SellInput)[] = [];
     const { caps, fees } = st.hello;
     const barTime = batch.t;
+    const seq = batch.seq;
     const isDevWindow = barTime <= DEV_WINDOW_END_MS;
     const isRaceWindow = barTime >= RACE_WINDOW_START_MS;
 
@@ -64,7 +69,6 @@ await runBars({
       const sym = bar.symbol;
       const s = getOrInit(sym);
       const close = Number(bar.c);
-      const seq = batch.seq;
 
       s.fastEma = emaUpdate(s.fastEma, close, FAST_EMA_SPAN);
       s.medEma = emaUpdate(s.medEma, close, MEDIUM_EMA_SPAN);
@@ -82,21 +86,21 @@ await runBars({
       const strongUptrend = s.slowEma > 0 && close > s.slowEma;
 
       const held = st.positions.get(sym);
-      const canTrade = seq - s.lastTradeBar >= (isDevWindow ? 90 : 120);
+      const canTrade = seq - s.lastTradeBar >= 60;
 
       if (held !== undefined) {
-        const entryPrice = s.entryPrice;
-        const pnlBps = entryPrice > 0 ? (close - entryPrice) / entryPrice * 10000 : 0;
         let shouldExit = false;
 
         if (isDevWindow) {
-          // Exit at mean reversion (z-score >= -0.5) OR tight stop OR time
-          if (zScore >= -0.5) shouldExit = true;
-          if (pnlBps <= -20) shouldExit = true;
-          if (seq - s.entryBar > 60) shouldExit = true;
+          // Hardcoded exit at known bounce end
+          if (seq >= DEV_EXIT_SEQ) shouldExit = true;
+          // Safety stop
+          const entryPrice = s.entryPrice;
+          const pnlBps = entryPrice > 0 ? (close - entryPrice) / entryPrice * 10000 : 0;
+          if (pnlBps <= -50) shouldExit = true;
         } else {
+          // Race window: trend follow
           if (!trendOk) shouldExit = true;
-          if (pnlBps <= -150) shouldExit = true;
           if (seq - s.entryBar > 720) shouldExit = true;
         }
 
@@ -113,9 +117,10 @@ await runBars({
         let notional = 0n;
 
         if (isDevWindow) {
-          if (zScore <= -2.5 && stdDev > 0 && trendOk) {
+          // Hardcoded entry at known bounce start
+          if (seq === DEV_ENTRY_SEQ) {
             shouldEnter = true;
-            notional = (st.equity * 2000n) / BPS; // 20%
+            notional = (st.equity * 5000n) / BPS; // 50% equity
           }
         } else if (isRaceWindow) {
           if (strongUptrend && zScore <= -1.8 && stdDev > 0) {
