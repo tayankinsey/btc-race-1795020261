@@ -1,19 +1,22 @@
-// Mean Reversion with Tight Risk Control
-// Catches oversold bounces, cuts losses fast, small position size
+// Trend-Filtered Mean Reversion with Asymmetric R:R
+// Only trades bounces when not in strong downtrend, 2:1 reward:risk
 
 import { BPS, runBars, type Bar, type BarsState, type BuyInput, type SellInput, type Hello } from './vendor/makefun-bars.ts';
 
 const FAST_EMA_SPAN = 20;
+const MEDIUM_EMA_SPAN = 50;
 const VOL_EMA_SPAN = 50;
 const ENTRY_ZSCORE = -2.5;
-const TAKE_PROFIT_BPS = 30;    // Exit at +30 bps from entry
-const STOP_LOSS_BPS = 30;      // Exit at -30 bps from entry
+const TAKE_PROFIT_BPS = 50;   // +50 bps target
+const STOP_LOSS_BPS = 25;     // -25 bps stop (2:1 R:R)
 const MIN_BARS_BETWEEN_TRADES = 60;
-const POSITION_WEIGHT_BPS = 2000;  // 20% of equity per trade
+const POSITION_WEIGHT_BPS = 2000;  // 20% equity
 const MAX_SLIPPAGE_BPS = 50;
+const TREND_BUFFER_BPS = 20;  // Allow price slightly below medium EMA
 
 interface SymbolState {
   fastEma: number;
+  medEma: number;
   volEma: number;
   lastClose: number;
   lastTradeBar: number;
@@ -27,7 +30,7 @@ const state = new Map<string, SymbolState>();
 function getOrInit(symbol: string): SymbolState {
   let s = state.get(symbol);
   if (!s) {
-    s = { fastEma: 0, volEma: 0, lastClose: 0, lastTradeBar: -999, inPosition: false, entryPrice: 0, entryBar: -1 };
+    s = { fastEma: 0, medEma: 0, volEma: 0, lastClose: 0, lastTradeBar: -999, inPosition: false, entryPrice: 0, entryBar: -1 };
     state.set(symbol, s);
   }
   return s;
@@ -62,6 +65,7 @@ await runBars({
       const seq = batch.seq;
 
       s.fastEma = emaUpdate(s.fastEma, close, FAST_EMA_SPAN);
+      s.medEma = emaUpdate(s.medEma, close, MEDIUM_EMA_SPAN);
 
       if (s.lastClose > 0) {
         const ret = (close - s.lastClose) / s.lastClose;
@@ -69,6 +73,8 @@ await runBars({
       }
       s.lastClose = close;
 
+      // Trend filter: not in strong downtrend
+      const trendOk = s.medEma > 0 && close >= s.medEma * (1 - TREND_BUFFER_BPS / 10000);
       const stdDev = s.volEma > 0 ? Math.sqrt(s.volEma) * close : 0;
       const zScore = s.fastEma > 0 && stdDev > 0 ? (close - s.fastEma) / stdDev : 0;
 
@@ -82,7 +88,8 @@ await runBars({
 
         if (pnlBps >= TAKE_PROFIT_BPS) shouldExit = true;
         if (pnlBps <= -STOP_LOSS_BPS) shouldExit = true;
-        if (seq - s.entryBar > 120) shouldExit = true;  // Max 2 hours
+        if (!trendOk) shouldExit = true;  // Exit if trend breaks
+        if (seq - s.entryBar > 120) shouldExit = true;
 
         if (shouldExit && canTrade) {
           orders.push({ side: 'sell', symbol: sym, qty: held.qty, max_slippage_bps: MAX_SLIPPAGE_BPS });
@@ -92,7 +99,7 @@ await runBars({
         }
       }
 
-      if (!s.inPosition && canTrade) {
+      if (!s.inPosition && trendOk && canTrade) {
         if (zScore <= ENTRY_ZSCORE && stdDev > 0) {
           const maxWeight = BigInt(caps.max_weight_bps);
           const weightRoom = (maxWeight * st.equity) / BPS - st.value(sym, held?.qty ?? 0n);
